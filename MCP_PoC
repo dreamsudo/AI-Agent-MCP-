@@ -1,0 +1,190 @@
+
+# Secure Multi-Layer Model Context Protocol (MCP) Pipeline  
+**Academic Proposal + Developer Manual**
+
+---
+
+## Abstract
+Large Language Models (LLMs) increasingly require controlled access to external tools such as databases, filesystems, and APIs. Unrestricted access presents risks including data exfiltration, prompt injection, and unlogged side effects.  
+
+This work introduces a **multi-layer Model Context Protocol (MCP) pipeline** that enforces security by routing all model requests through segmented servers with cryptographic protections.  
+
+A proof-of-concept (POC) has been implemented featuring:  
+- TLS transport encryption  
+- Optional AES payload encryption  
+- Encrypted logging  
+- Monitoring tap (“Puerta”)  
+
+Future work will extend this with **semantic security engines, de-obfuscation layers, adaptive cryptography, and AI-aware anomaly detection**, while behavioral data is collected for training AI cybersecurity models.
+
+---
+
+## 1. Introduction
+- LLMs create new security risks: unrestricted tool invocation, uncontrolled queries, and hidden side effects.  
+- Existing primitives (TLS, RBAC, firewalls) are insufficient for **semantic-level threats** (e.g., prompt injection).  
+- Challenge: enforce **least privilege, accountability, resilience** in AI pipelines.  
+
+**Contributions:**  
+- Baseline POC with modular servers.  
+- Security mechanisms: TLS, AES, Puerta monitoring, encrypted logs.  
+- Research roadmap for semantic + adaptive AI-driven security.  
+
+---
+
+## 2. System Architecture (POC Baseline)
+
+### Components
+- **Security Server (8443)**: TLS entrypoint, payload encryption, Puerta monitoring, logs IN/OUT.  
+- **Registry Server (8500)**: Validates model-to-tool policies.  
+- **Tool Directory Server (8600)**: Returns only authorized tools.  
+- **Gateway Server (8650)**: Routes requests to tool servers.  
+- **Tool Servers (8610–8630)**: DB, File, API.  
+- **Log Aggregator (8660)**: Merges logs for audit, supports encryption.  
+
+### ASCII Diagram
+
+MODEL / USER ──TLS──► SECURITY SERVER (8443)
+- Auth placeholder
+- AES encryption option
+- Puerta monitoring
+- Logs IN/OUT
+│
+▼
+REGISTRY SERVER (8500)
+	•	Policy enforcement
+	•	Logs IN/OUT
+│
+▼
+TOOL DIRECTORY SERVER (8600)
+	•	Authorized tool list
+	•	Logs IN/OUT
+│
+▼
+GATEWAY SERVER (8650)
+	•	Routes execution
+	•	Logs IN/OUT
+│
+├── DB TOOL SERVER (8610)
+├── FILE TOOL SERVER (8620)
+└── API TOOL SERVER (8630)
+
+LOG AGGREGATOR (8660)
+	•	Collects + merges logs
+	•	Optional AES log encryption
+
+---
+
+## 3. Implementation Features
+- **Transport Security**: TLS on all exposed servers.  
+- **Payload Security**: Optional AES-256-GCM encryption.  
+- **Logging**: IN/OUT logged at each hop, central aggregator.  
+- **Puerta Tap**: Encrypted monitoring channel.  
+- **Registry Policies**: Per-model tool whitelisting.  
+- **Config-Driven**: JSON-based configs.  
+
+---
+
+## 4. Running the System
+
+### 4.1 Setup
+```bash
+cd ~/MCP_Project
+chmod +x setup.sh
+./setup.sh
+
+4.2 Start Servers
+
+source venv/bin/activate
+python launcher.py
+
+4.3 Verify with Health Check
+
+./test.sh
+
+4.4 Full Integration Test
+
+./test_pipeline.sh
+
+
+⸻
+
+5. Example Tests
+
+File Tool
+
+curl -k -sS -X POST https://127.0.0.1:8650/execute \
+  -H "Content-Type: application/json" \
+  -d '{"tool":"file","payload":{"filename":"test.txt"}}'
+
+DB Tool
+
+curl -k -sS -X POST https://127.0.0.1:8650/execute \
+  -H "Content-Type: application/json" \
+  -d '{"tool":"db","payload":{"query":"SELECT 1"}}'
+
+API Tool
+
+curl -k -sS -X POST https://127.0.0.1:8650/execute \
+  -H "Content-Type: application/json" \
+  -d '{"tool":"api","payload":{"endpoint":"http://httpbin.org/get"}}'
+
+
+⸻
+
+6. Logs
+
+Logs are stored in session_logs/.
+
+Example:
+
+tail -f session_logs/gateway_server.log
+
+Expected log entries:
+
+[IN] {... request body ...}
+[OUT] {... response body ...}
+
+
+⸻
+
+7. Research Extensions
+	•	Semantic Security Engine: Detect prompt injection, data exfiltration attempts.
+	•	De-obfuscation Layer: Catch obfuscated payloads.
+	•	Adaptive Cryptography: Switch between AES/TLS/post-quantum crypto.
+	•	Decryptor Module: Controlled microservice for sensitive decryptions.
+	•	AI Security Models: Train anomaly detection models on behavioral logs.
+
+⸻
+
+8. Evaluation Plan
+	•	Performance: Measure latency overhead of multi-hop pipeline.
+	•	Security: Test prompt injection, obfuscation, adversarial inputs.
+	•	Robustness: Fault injection (crashes, replay attacks).
+	•	Metrics: Latency, throughput, detection rate, false positives.
+
+⸻
+
+9. Expected Contributions
+	•	Generalizable secure AI tool pipeline.
+	•	Cryptographic + semantic security integration.
+	•	Public POC with roadmap for AI-secure infrastructures.
+
+⸻
+
+10. Conclusion
+
+The MCP POC demonstrates the feasibility of layered cryptographic and policy-based security for AI pipelines.
+Future expansions will leverage semantic firewalls and AI-based anomaly detection, with behavioral data collected for cybersecurity model training.
+
+
+
+
+
+
+
+
+
+
+
+
+

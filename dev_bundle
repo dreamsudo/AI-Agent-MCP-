@@ -1,0 +1,562 @@
+
+📦 Secure MCP Project — Complete Developer Bundle
+
+⸻
+
+1. Project Tree
+
+MCP_Project/
+├── configs/
+│   ├── auth_config.json
+│   ├── registry_config.json
+│   ├── security_config.json
+│   ├── tools_config.json
+│   └── certs/
+│       ├── cert.pem
+│       └── key.pem
+├── crypto_utils.py
+├── gateway_server.py
+├── launcher.py
+├── log_aggregator.py
+├── registry_server.py
+├── security_server.py
+├── tool_directory_server.py
+└── tool_servers/
+    ├── api_tool_server.py
+    ├── db_tool_server.py
+    └── file_tool_server.py
+
+
+⸻
+
+2. Config Files (configs/)
+
+configs/security_config.json
+
+{
+  "use_tls": true,
+  "cert_file": "configs/certs/cert.pem",
+  "key_file": "configs/certs/key.pem",
+  "enable_payload_encryption": false,
+  "encryption_key_env": "MCP_SECRET_KEY",
+  "puerta_enabled": true,
+  "puerta_key_env": "MCP_PUERTA_KEY"
+}
+
+configs/registry_config.json
+
+{
+  "use_tls": true,
+  "enable_payload_encryption": false,
+  "encryption_key_env": "MCP_SECRET_KEY"
+}
+
+configs/tools_config.json
+
+{
+  "use_tls": true,
+  "enable_payload_encryption": false,
+  "encryption_key_env": "MCP_SECRET_KEY"
+}
+
+configs/auth_config.json
+
+{
+  "auth_required": false,
+  "providers": []
+}
+
+
+⸻
+
+3. Core Utilities
+
+crypto_utils.py
+
+"""
+crypto_utils.py
+---------------
+Encryption/decryption and TLS utilities for MCP servers.
+"""
+
+import os
+import base64
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+def get_key_from_env(env_var: str) -> bytes:
+    key_hex = os.getenv(env_var)
+    if not key_hex:
+        raise EnvironmentError(f"Missing env var: {env_var}")
+    return bytes.fromhex(key_hex)
+
+def encrypt_payload(data: bytes, key: bytes) -> str:
+    aesgcm = AESGCM(key)
+    nonce = os.urandom(12)
+    ct = aesgcm.encrypt(nonce, data, None)
+    return base64.b64encode(nonce + ct).decode()
+
+def decrypt_payload(token: str, key: bytes) -> bytes:
+    raw = base64.b64decode(token)
+    nonce, ct = raw[:12], raw[12:]
+    aesgcm = AESGCM(key)
+    return aesgcm.decrypt(nonce, ct, None)
+
+def get_tls_config(cert_file: str, key_file: str):
+    return {"ssl_certfile": cert_file, "ssl_keyfile": key_file}
+
+
+⸻
+
+4. Servers
+
+security_server.py
+
+"""
+security_server.py
+------------------
+Central chokehold server for the MCP pipeline.
+"""
+
+import json
+import logging
+import httpx
+from fastapi import FastAPI, Request, HTTPException
+import uvicorn
+
+from crypto_utils import get_key_from_env, encrypt_payload, get_tls_config
+
+with open("configs/security_config.json") as f:
+    CONFIG = json.load(f)
+
+USE_TLS = CONFIG["use_tls"]
+CERT_FILE = CONFIG["cert_file"]
+KEY_FILE = CONFIG["key_file"]
+
+ENABLE_PAYLOAD_ENCRYPTION = CONFIG["enable_payload_encryption"]
+ENCRYPTION_KEY_ENV = CONFIG["encryption_key_env"]
+
+PUERTA_ENABLED = CONFIG["puerta_enabled"]
+PUERTA_KEY_ENV = CONFIG["puerta_key_env"]
+
+REGISTRY_URL = "https://127.0.0.1:8500/registry"
+
+app = FastAPI(title="Security Server")
+logger = logging.getLogger("security_server")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+puerta_tap = []
+
+def puerta_capture(payload: dict):
+    if PUERTA_ENABLED:
+        try:
+            key = get_key_from_env(PUERTA_KEY_ENV)
+            encrypted = encrypt_payload(json.dumps(payload).encode(), key)
+            puerta_tap.append(encrypted)
+        except Exception as e:
+            logger.error(f"Puerta capture failed: {e}")
+
+@app.get("/puerta")
+def puerta_view():
+    if not PUERTA_ENABLED:
+        raise HTTPException(status_code=403, detail="Puerta disabled")
+    return {"captured": puerta_tap}
+
+@app.post("/secure")
+async def secure_entry(request: Request):
+    body = await request.json()
+    logger.info(f"[IN] {body}")
+    puerta_capture({"in": body})
+
+    forward_body = (
+        {"encrypted": encrypt_payload(json.dumps(body).encode(),
+                                      get_key_from_env(ENCRYPTION_KEY_ENV))}
+        if ENABLE_PAYLOAD_ENCRYPTION else body
+    )
+
+    try:
+        async with httpx.AsyncClient(verify=False) as client:
+            r = await client.post(REGISTRY_URL, json=forward_body)
+            r.raise_for_status()
+            response = r.json()
+    except Exception as e:
+        logger.error(f"Forwarding to Registry failed: {e}")
+        raise HTTPException(status_code=502, detail="Registry unreachable")
+
+    puerta_capture({"out": response})
+    logger.info(f"[OUT] {response}")
+    return response
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "security_server:app",
+        host="127.0.0.1",
+        port=8443,
+        **(get_tls_config(CERT_FILE, KEY_FILE) if USE_TLS else {})
+    )
+
+
+⸻
+
+registry_server.py
+
+"""
+registry_server.py
+------------------
+Policy enforcement layer in the MCP pipeline.
+"""
+
+import json
+import logging
+from fastapi import FastAPI, Request, HTTPException
+import uvicorn
+
+from crypto_utils import get_key_from_env, encrypt_payload, get_tls_config
+
+with open("configs/registry_config.json") as f:
+    CONFIG = json.load(f)
+
+USE_TLS = CONFIG["use_tls"]
+CERT_FILE = "configs/certs/cert.pem"
+KEY_FILE = "configs/certs/key.pem"
+
+ENABLE_PAYLOAD_ENCRYPTION = CONFIG["enable_payload_encryption"]
+ENCRYPTION_KEY_ENV = CONFIG["encryption_key_env"]
+
+MODEL_POLICIES = {
+    "model_alpha": ["db", "file"],
+    "model_beta": ["api"],
+    "default": ["file"]
+}
+
+app = FastAPI(title="Registry Server")
+logger = logging.getLogger("registry_server")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+def check_policy(model_id: str, requested_tool: str) -> bool:
+    return requested_tool in MODEL_POLICIES.get(model_id, MODEL_POLICIES["default"])
+
+@app.post("/registry")
+async def registry_entry(request: Request):
+    body = await request.json()
+    logger.info(f"[IN] {body}")
+
+    model_id, requested_tool = body.get("model_id"), body.get("tool")
+    if not model_id or not requested_tool:
+        raise HTTPException(status_code=400, detail="Missing model_id or tool")
+
+    if not check_policy(model_id, requested_tool):
+        raise HTTPException(status_code=403, detail="Access denied by registry policy")
+
+    response = {"authorized": True, "forward": body}
+    if ENABLE_PAYLOAD_ENCRYPTION:
+        response = {"encrypted": encrypt_payload(json.dumps(body).encode(),
+                                                 get_key_from_env(ENCRYPTION_KEY_ENV))}
+    logger.info(f"[OUT] {response}")
+    return response
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "registry_server:app",
+        host="127.0.0.1",
+        port=8500,
+        **(get_tls_config(CERT_FILE, KEY_FILE) if USE_TLS else {})
+    )
+
+
+⸻
+
+tool_directory_server.py
+
+"""
+tool_directory_server.py
+------------------------
+Provides filtered tool list to authorized models.
+"""
+
+import json
+import logging
+from fastapi import FastAPI, Request, HTTPException
+import uvicorn
+
+from crypto_utils import get_key_from_env, encrypt_payload, get_tls_config
+
+with open("configs/tools_config.json") as f:
+    CONFIG = json.load(f)
+
+USE_TLS = CONFIG["use_tls"]
+CERT_FILE = "configs/certs/cert.pem"
+KEY_FILE = "configs/certs/key.pem"
+
+ENABLE_PAYLOAD_ENCRYPTION = CONFIG["enable_payload_encryption"]
+ENCRYPTION_KEY_ENV = CONFIG["encryption_key_env"]
+
+TOOL_INVENTORY = {
+    "db": {"description": "Database query tool", "endpoint": "/tool/db"},
+    "file": {"description": "File system access", "endpoint": "/tool/file"},
+    "api": {"description": "External API caller", "endpoint": "/tool/api"}
+}
+
+app = FastAPI(title="Tool Directory Server")
+logger = logging.getLogger("tool_directory_server")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+@app.post("/tools")
+async def get_tools(request: Request):
+    body = await request.json()
+    model_id, allowed_tools = body.get("model_id"), body.get("allowed_tools")
+    if not model_id or not allowed_tools:
+        raise HTTPException(status_code=400, detail="Missing model_id or allowed_tools")
+
+    filtered_tools = {t: TOOL_INVENTORY[t] for t in allowed_tools if t in TOOL_INVENTORY}
+    response = {"tools": filtered_tools, "model_id": model_id}
+
+    if ENABLE_PAYLOAD_ENCRYPTION:
+        response = {"encrypted": encrypt_payload(json.dumps(response).encode(),
+                                                 get_key_from_env(ENCRYPTION_KEY_ENV))}
+    logger.info(f"[OUT] {response}")
+    return response
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "tool_directory_server:app",
+        host="127.0.0.1",
+        port=8600,
+        **(get_tls_config(CERT_FILE, KEY_FILE) if USE_TLS else {})
+    )
+
+
+⸻
+
+gateway_server.py
+
+"""
+gateway_server.py
+-----------------
+Routes execution requests to the correct Tool Server.
+"""
+
+import json
+import logging
+import httpx
+from fastapi import FastAPI, Request, HTTPException
+import uvicorn
+
+from crypto_utils import get_key_from_env, encrypt_payload, get_tls_config
+
+with open("configs/registry_config.json") as f:
+    CONFIG = json.load(f)
+
+USE_TLS = CONFIG["use_tls"]
+CERT_FILE = "configs/certs/cert.pem"
+KEY_FILE = "configs/certs/key.pem"
+
+ENABLE_PAYLOAD_ENCRYPTION = CONFIG["enable_payload_encryption"]
+ENCRYPTION_KEY_ENV = CONFIG["encryption_key_env"]
+
+TOOL_ENDPOINTS = {
+    "db": "http://127.0.0.1:8610/tool/db",
+    "file": "http://127.0.0.1:8620/tool/file",
+    "api": "http://127.0.0.1:8630/tool/api"
+}
+
+app = FastAPI(title="Gateway Server")
+logger = logging.getLogger("gateway_server")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+@app.post("/execute")
+async def execute_tool(request: Request):
+    body = await request.json()
+    tool_name, payload = body.get("tool"), body.get("payload")
+
+    if not tool_name or not payload:
+        raise HTTPException(status_code=400, detail="Missing tool or payload")
+    if tool_name not in TOOL_ENDPOINTS:
+        raise HTTPException(status_code=403, detail="Tool not recognized")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(TOOL_ENDPOINTS[tool_name], json=payload)
+            resp.raise_for_status()
+            result = resp.json()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Tool server error: {e}")
+
+    response = {"tool": tool_name, "result": result}
+    if ENABLE_PAYLOAD_ENCRYPTION:
+        response = {"encrypted": encrypt_payload(json.dumps(response).encode(),
+                                                 get_key_from_env(ENCRYPTION_KEY_ENV))}
+    return response
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "gateway_server:app",
+        host="127.0.0.1",
+        port=8650,
+        **(get_tls_config(CERT_FILE, KEY_FILE) if USE_TLS else {})
+    )
+
+
+⸻
+
+5. Tool Servers (tool_servers/)
+
+Each runs independently.
+
+tool_servers/db_tool_server.py
+
+from fastapi import FastAPI, Request
+import uvicorn
+
+app = FastAPI(title="DB Tool Server")
+
+@app.post("/tool/db")
+async def run_db_tool(request: Request):
+    body = await request.json()
+    query = body.get("query", "NO QUERY")
+    return {"status": "ok", "query": query, "rows": [[1]]}
+
+if __name__ == "__main__":
+    uvicorn.run("db_tool_server:app", host="127.0.0.1", port=8610)
+
+tool_servers/file_tool_server.py
+
+from fastapi import FastAPI, Request
+import uvicorn
+import os
+
+app = FastAPI(title="File Tool Server")
+
+@app.post("/tool/file")
+async def file_tool(request: Request):
+    body = await request.json()
+    action = body.get("action")
+    path = body.get("path")
+
+    if action == "read" and os.path.exists(path):
+        with open(path, "r") as f:
+            return {"status": "ok", "content": f.read()}
+    elif action == "write":
+        with open(path, "w") as f:
+            f.write(body.get("content", ""))
+        return {"status": "ok", "message": f"Written to {path}"}
+    else:
+        return {"status": "error", "message": "Unsupported action or file not found"}
+
+if __name__ == "__main__":
+    uvicorn.run("file_tool_server:app", host="127.0.0.1", port=8620)
+
+tool_servers/api_tool_server.py
+
+from fastapi import FastAPI, Request
+import uvicorn
+
+app = FastAPI(title="API Tool Server")
+
+@app.post("/tool/api")
+async def call_api(request: Request):
+    body = await request.json()
+    endpoint = body.get("endpoint")
+    return {"status": "ok", "endpoint": endpoint, "response": "dummy_api_result"}
+
+if __name__ == "__main__":
+    uvicorn.run("api_tool_server:app", host="127.0.0.1", port=8630)
+
+
+⸻
+
+6. Log Aggregator
+
+log_aggregator.py
+
+"""
+log_aggregator.py
+-----------------
+Central log collector and merger.
+"""
+
+import os, json, logging
+from fastapi import FastAPI, Request
+import uvicorn
+from datetime import datetime
+from crypto_utils import get_key_from_env, encrypt_payload, decrypt_payload, get_tls_config
+
+CONFIG = {
+    "use_tls": False,
+    "enable_log_encryption": False,
+    "log_key_env": "MCP_LOG_KEY",
+    "log_dir": "session_logs"
+}
+os.makedirs(CONFIG["log_dir"], exist_ok=True)
+
+app = FastAPI(title="Log Aggregator")
+logger = logging.getLogger("log_aggregator")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+def save_log(component: str, entry: dict):
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    filename = os.path.join(CONFIG["log_dir"], f"{component}_{timestamp}.log")
+    if CONFIG["enable_log_encryption"]:
+        key = get_key_from_env(CONFIG["log_key_env"])
+        encrypted = encrypt_payload(json.dumps(entry).encode(), key)
+        with open(filename, "w") as f: f.write(encrypted)
+    else:
+        with open(filename, "w") as f: json.dump(entry, f, indent=2)
+    logger.info(f"Saved log: {filename}")
+
+@app.post("/log/{component}")
+async def log_entry(component: str, request: Request):
+    body = await request.json()
+    save_log(component, body)
+    return {"status": "ok"}
+
+@app.get("/session/{session_id}")
+async def get_session_logs(session_id: str):
+    merged = []
+    for file in os.listdir(CONFIG["log_dir"]):
+        if session_id in file:
+            with open(os.path.join(CONFIG["log_dir"], file), "r") as f:
+                data = f.read()
+                merged.append(json.loads(data))
+    return {"session": session_id, "logs": merged}
+
+if __name__ == "__main__":
+    uvicorn.run("log_aggregator:app", host="127.0.0.1", port=8660)
+
+
+⸻
+
+7. Launcher
+
+launcher.py
+
+"""
+launcher.py
+-----------
+Simple process launcher for MCP servers.
+"""
+
+import subprocess, time
+
+SERVERS = [
+    ("log_aggregator.py", 8660),
+    ("security_server.py", 8443),
+    ("registry_server.py", 8500),
+    ("tool_directory_server.py", 8600),
+    ("gateway_server.py", 8650),
+    ("tool_servers/db_tool_server.py", 8610),
+    ("tool_servers/file_tool_server.py", 8620),
+    ("tool_servers/api_tool_server.py", 8630),
+]
+
+procs = []
+for script, port in SERVERS:
+    print(f"[+] Starting {script} on port {port}")
+    procs.append(subprocess.Popen(["python", script]))
+    time.sleep(1)
+
+print("\nAll servers launched. Press Ctrl+C to stop.\n")
+try:
+    for p in procs: p.wait()
+except KeyboardInterrupt:
+    for p in procs: p.terminate()
+
